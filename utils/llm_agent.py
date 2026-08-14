@@ -23,8 +23,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
-MAX_TOOL_ROUNDS = 5
+DEFAULT_MODEL = "qwen/qwen3.6-27b"
+# The insights prompt asks for five separate tools, and some models fetch only
+# one per round, so this ceiling has to clear that comfortably.
+MAX_TOOL_ROUNDS = 8
 
 DISCLAIMER = (
     "This is informational analysis of your own uploaded data, not financial advice."
@@ -40,6 +42,11 @@ anything about numbers, holdings, prices, or performance.
 moved. If asked "why" a stock moved and you only have price data, say what the price \
 did and state plainly that you don't have news access.
 - If the tools don't cover something, say so instead of guessing.
+- Quote the tools' figures as they come back. Never re-group holdings into your own \
+categories or recompute a percentage the tools already report — if the sector tool says \
+44.1% Technology, that is the number, even if you would have classified the companies \
+differently. Contradicting the app's own displayed figures is the worst failure you can \
+make.
 - No buy/sell recommendations. You may describe risks that follow arithmetically from \
 the data, such as concentration.
 - Be concise and specific. Use real figures with tickers. Prefer 3-6 sentences or a \
@@ -193,6 +200,14 @@ PLAIN_TEXT_NUDGE = (
     "write function-call syntax in your reply."
 )
 
+# Provider-side flakes that succeed when the identical request is retried.
+TRANSIENT_ERRORS = ("output_parse_failed", "tool_use_failed")
+
+WRAP_UP_NUDGE = (
+    "Stop calling tools and write your final answer now, using only the tool "
+    "results already gathered above."
+)
+
 # Llama models occasionally emit a tool call as literal text instead of using the
 # tool-calling channel. Left alone it reaches the user as raw XML.
 _PSEUDO_CALL = re.compile(r"<function=.*?(?:</function>|$)", re.DOTALL)
@@ -200,6 +215,58 @@ _PSEUDO_CALL = re.compile(r"<function=.*?(?:</function>|$)", re.DOTALL)
 
 def _strip_pseudo_calls(text: str) -> str:
     return _PSEUDO_CALL.sub("", text).strip()
+
+
+def _readable_wait(raw: str) -> str:
+    """Groq reports waits like '11m16.512s' or '2.182499999s'. Round them off."""
+    m = re.match(r"(?:(\d+)m)?([\d.]+)s", raw)
+    if not m:
+        return raw
+    minutes, seconds = int(m.group(1) or 0), round(float(m.group(2)))
+    if minutes:
+        return f"{minutes} min {seconds} sec" if seconds else f"{minutes} min"
+    return f"{max(seconds, 1)} sec"
+
+
+def _friendly_error(exc: Exception) -> str:
+    """Turn provider errors into something the user can act on.
+
+    A raw 429 payload is a wall of JSON that buries the one useful fact: free
+    tier limits are per model, so switching models is an instant fix.
+    """
+    text = str(exc)
+    if "rate_limit" in text or "429" in text:
+        wait = re.search(r"try again in ([\w.]+)", text)
+        when = _readable_wait(wait.group(1)) if wait else None
+
+        # A per-minute burst limit clears on its own in seconds; the daily token
+        # budget does not, and needs a different model. Telling the user to edit
+        # config when they only need to pause would be actively unhelpful.
+        if "per day" in text or "TPD" in text:
+            return (
+                "⚠️ **Groq's free daily token budget for this model is used up.**"
+                + (f" It resets in about **{when}**." if when else "")
+                + "\n\nThe budget is *per model*, so the quickest fix is to change "
+                "`GROQ_MODEL` in your `.env` and restart the app — try "
+                "`openai/gpt-oss-120b` or `llama-3.3-70b-versatile`. Every other "
+                "tab works without the AI."
+            )
+        return (
+            "⚠️ **Too many AI requests in a short window.** Wait "
+            + (f"**{when}**" if when else "a moment")
+            + " and ask again — this one clears on its own."
+        )
+    if "invalid_api_key" in text or "401" in text:
+        return (
+            "⚠️ **Groq rejected the API key.** Check `GROQ_API_KEY` in your `.env` "
+            "against https://console.groq.com/keys, then restart the app."
+        )
+    if "model_not_found" in text or "does not exist" in text:
+        return (
+            f"⚠️ **Groq doesn't recognise that model.** Check `GROQ_MODEL` in your "
+            f"`.env` against https://console.groq.com/docs/models.\n\n`{text[:200]}`"
+        )
+    return f"⚠️ The AI request failed: {exc}"
 
 
 class GroqNotConfigured(RuntimeError):
@@ -226,7 +293,12 @@ class AgentContext:
 
 
 def _frame(df: pd.DataFrame | None, limit: int = 40) -> Any:
-    """Compact, token-cheap serialisation of a dataframe for the model."""
+    """Compact, token-cheap serialisation of a dataframe for the model.
+
+    CSV rather than JSON records: a record-per-row payload repeats every column
+    name on every row, which roughly doubles the token cost of a wide table for
+    no gain in comprehension.
+    """
     if df is None or df.empty:
         return "no data available"
     out = df.head(limit).copy()
@@ -235,10 +307,10 @@ def _frame(df: pd.DataFrame | None, limit: int = 40) -> Any:
             out[c] = out[c].dt.strftime("%Y-%m-%d")
         elif pd.api.types.is_float_dtype(out[c]):
             out[c] = out[c].round(2)
-    payload = out.to_dict(orient="records")
+    text = out.to_csv(index=False).strip()
     if len(df) > limit:
-        payload.append({"note": f"{len(df) - limit} more rows omitted"})
-    return payload
+        text += f"\n({len(df) - limit} more rows omitted)"
+    return text
 
 
 def _clean(d: dict) -> dict:
@@ -363,13 +435,36 @@ class PortfolioAgent:
 
     # -- conversation --------------------------------------------------------
 
+    def _create(self, client, kwargs: dict, attempts: int = 3):
+        """Call the API, retrying the provider's own non-deterministic failures.
+
+        Groq intermittently rejects a completion with ``output_parse_failed``
+        when it cannot parse the model's tool-call output — the same request
+        succeeds on a retry, so failing the whole answer would be needless.
+        """
+        last: Exception | None = None
+        for _ in range(attempts):
+            try:
+                return client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                if not any(code in str(exc) for code in TRANSIENT_ERRORS):
+                    raise
+                last = exc
+        raise last  # type: ignore[misc]
+
     def _complete(self, messages: list[dict], use_tools: bool = True, temperature: float = 0.3):
         client = self._get_client()
         tools = self._tools()
         convo = list(messages)
         last_used: list[str] = []
 
-        for _ in range(MAX_TOOL_ROUNDS):
+        for round_no in range(MAX_TOOL_ROUNDS):
+            if round_no == MAX_TOOL_ROUNDS - 1:
+                # Last permitted round: ask for the answer now. The tool schema
+                # stays attached, because a model that emits a call when no tools
+                # are advertised gets a 400 back from the provider.
+                convo.append({"role": "user", "content": WRAP_UP_NUDGE})
+
             kwargs: dict[str, Any] = {
                 "model": self.model, "messages": convo,
                 "temperature": temperature, "max_tokens": 1200,
@@ -378,7 +473,7 @@ class PortfolioAgent:
                 kwargs["tools"] = TOOL_SCHEMA
                 kwargs["tool_choice"] = "auto"
 
-            msg = client.chat.completions.create(**kwargs).choices[0].message
+            msg = self._create(client, kwargs).choices[0].message
             calls = getattr(msg, "tool_calls", None)
             if not calls:
                 content = _strip_pseudo_calls(msg.content or "")
@@ -417,20 +512,23 @@ class PortfolioAgent:
                     result = fn(**args) if fn else f"unknown tool: {name}"
                 except Exception as exc:  # a broken tool shouldn't kill the chat
                     result = f"tool error: {exc}"
+                # Strings (already CSV) go through raw; JSON-encoding them would
+                # only escape every newline and quote back into the payload.
+                payload = result if isinstance(result, str) else json.dumps(result, default=str)
                 convo.append({
                     "role": "tool", "tool_call_id": call.id, "name": name,
-                    "content": json.dumps(result, default=str)[:12000],
+                    "content": payload[:12000],
                 })
 
             # Loop back so the model can answer using the tool output, or call more.
             last_used = used
 
-        # Ran out of rounds: force a final answer without tools.
-        convo.append({"role": "user", "content": PLAIN_TEXT_NUDGE})
-        final = client.chat.completions.create(
-            model=self.model, messages=convo, temperature=temperature, max_tokens=800
-        ).choices[0].message
-        return _strip_pseudo_calls(final.content or ""), last_used
+        # Still calling tools after the wrap-up nudge. Everything fetched is in
+        # the transcript, so say so rather than surfacing a provider error.
+        return (
+            "I gathered the data but ran out of steps before summarising it. "
+            "Try asking a narrower question.", last_used,
+        )
 
     def chat(self, history: list[dict]) -> tuple[str, list[str]]:
         """Answer the latest user message. Returns (reply, tools_used)."""
@@ -442,7 +540,7 @@ class PortfolioAgent:
         except GroqNotConfigured:
             raise
         except Exception as exc:
-            return f"⚠️ The AI request failed: {exc}", []
+            return _friendly_error(exc), []
         if not reply:
             return "⚠️ The model returned an empty response. Try rephrasing your question.", used
         return reply, used
@@ -465,7 +563,7 @@ class PortfolioAgent:
         except GroqNotConfigured:
             raise
         except Exception as exc:
-            return f"⚠️ Could not generate summary: {exc}"
+            return _friendly_error(exc)
 
     def proactive_insights(self) -> str:
         """Unprompted findings: the agent decides what's worth flagging."""
@@ -488,4 +586,4 @@ class PortfolioAgent:
         except GroqNotConfigured:
             raise
         except Exception as exc:
-            return f"⚠️ Could not generate insights: {exc}"
+            return _friendly_error(exc)

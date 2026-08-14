@@ -104,9 +104,30 @@ All optional except the API key — see `.env.example`.
 | Variable | Default | Purpose |
 |---|---|---|
 | `GROQ_API_KEY` | — | Required only for the AI tab; every other tab works without it. |
-| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Smaller "instant" models are unreliable at tool selection. |
+| `GROQ_MODEL` | `qwen/qwen3.6-27b` | Must support tool calling well — see below. |
 | `BENCHMARK_TICKER` | `SPY` | The "just buy the index" baseline. |
 | `RISK_FREE_RATE` | `0.045` | Used for the Sharpe ratio. |
+
+### Choosing a model
+
+The agent lives or dies on tool calling, and the models differ more than their
+benchmarks suggest. Tested against this portfolio:
+
+| Model | Verdict |
+|---|---|
+| `qwen/qwen3.6-27b` | **Default.** Grounded, well formatted, no failures in testing. |
+| `openai/gpt-oss-120b` | Equally reliable, spends the token budget faster. |
+| `llama-3.3-70b-versatile` | Works, heaviest on tokens. Occasionally prints tool-call syntax as prose (handled). |
+| `openai/gpt-oss-20b` | **Avoid** — intermittently returns unparseable output. |
+| `llama-3.1-8b-instant` | **Avoid** — ignores the "no recommendations" rule and gives investment advice. |
+
+### If the AI tab hits a rate limit
+
+Groq's free tier caps tokens **per day, per model**. On a 429 the app says which
+limit was hit and how long it lasts: a per-minute burst clears itself in seconds,
+while an exhausted daily budget needs a different `GROQ_MODEL` — switching gives
+you a fresh allowance. Tool payloads are serialised as CSV rather than JSON
+records, which cuts 38–58% off the tokens a wide table costs.
 
 ## Layout
 
