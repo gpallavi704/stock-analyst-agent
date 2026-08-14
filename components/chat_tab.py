@@ -41,7 +41,7 @@ def _setup_help() -> None:
         "1. Create a free key at [console.groq.com](https://console.groq.com/keys)\n"
         "2. Add it to a `.env` file in the project root:\n"
     )
-    st.code("GROQ_API_KEY=gsk_your_key_here\nGROQ_MODEL=llama-3.3-70b-versatile", language="bash")
+    st.code("GROQ_API_KEY=gsk_your_key_here\nGROQ_MODEL=qwen/qwen3.6-27b", language="bash")
     st.markdown("3. Restart the app.")
     st.caption("Every other tab works fully without a key — only this one is gated.")
 

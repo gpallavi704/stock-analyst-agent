@@ -188,6 +188,31 @@ data/sample_transactions.csv
 cached, then passed to every tab. A number on a chart, a number in a metric card, and a
 number in the AI's answer therefore cannot disagree with each other.
 
+## Handling the API key
+
+The Groq key is the only secret in this project. It is never committed, never logged, and
+never rendered in the UI — it is read from the environment and passed straight to the Groq
+client.
+
+- **`.env` is gitignored** and should be `chmod 600` (owner-read only).
+- **Only `.env.example` is committed**, holding placeholders.
+- **A pre-commit hook** in `.githooks/` refuses to commit a `.env`, a `secrets.toml`, a
+  private key file, or any real-looking credential pasted into source. Enable it once per
+  clone:
+
+  ```bash
+  git config core.hooksPath .githooks
+  ```
+
+- **Deployed**, the key lives in the host's Secrets store, not in the repo.
+
+Encrypting `.env` at rest would add little: the app must decrypt it to use it, so the key
+material stays reachable by anything running as you. The controls that actually matter are
+keeping it out of version control, off screen, and scoped so it can be revoked. Groq keys
+grant only API usage on your own account — no billing or account access — and can be
+revoked instantly at https://console.groq.com/keys. **If a key is ever exposed, rotate it
+there rather than trying to scrub it.**
+
 ## Notes and limitations
 
 - Prices come from Yahoo Finance and may be delayed. Quotes cache for 5 minutes, price

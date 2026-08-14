@@ -1,0 +1,35 @@
+#!/bin/sh
+# Refuse to commit anything that would publish a secret.
+#
+# .gitignore already excludes .env, but ignore rules are easy to defeat by
+# accident (git add -f, a renamed copy, a key pasted into a source file). This
+# is the backstop: it inspects what is actually staged, right before it becomes
+# a commit.
+#
+# Enable with:  git config core.hooksPath .githooks
+
+staged=$(git diff --cached --name-only)
+
+# 1. Secrets files, whatever directory they appear in.
+if printf '%s\n' "$staged" | grep -qE '(^|/)\.env($|\.)|(^|/)secrets\.toml$|\.pem$|\.p12$|(^|/)id_rsa$'; then
+    echo "COMMIT BLOCKED: a secrets file is staged."
+    printf '%s\n' "$staged" | grep -E '(^|/)\.env($|\.)|(^|/)secrets\.toml$|\.pem$|\.p12$|(^|/)id_rsa$' | sed 's/^/  /'
+    echo
+    echo "Unstage it:  git restore --staged <file>"
+    echo "Only .env.example, with placeholder values, belongs in the repo."
+    exit 1
+fi
+
+# 2. Real-looking credentials in the added lines. Placeholders such as
+#    gsk_your_key_here stay allowed, since the setup docs need to show the shape.
+if git diff --cached -U0 | grep -qE '^\+.*(gsk_[A-Za-z0-9]{30,}|sk-[A-Za-z0-9]{30,}|ghp_[A-Za-z0-9]{30,}|xox[baprs]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16})'; then
+    echo "COMMIT BLOCKED: what looks like a real API key is in the staged changes."
+    echo
+    git diff --cached -U0 --name-only | sed 's/^/  /'
+    echo
+    echo "Remove the key and use an environment variable instead."
+    echo "If this is a false positive:  git commit --no-verify"
+    exit 1
+fi
+
+exit 0
