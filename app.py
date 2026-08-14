@@ -7,6 +7,8 @@ metric card, and in the AI's answer can never disagree with each other.
 
 from __future__ import annotations
 
+import os
+
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -14,6 +16,27 @@ from components import chat_tab, data_upload_tab, performance_tab, portfolio_vie
 from utils.pipeline import build_analysis, settings
 
 load_dotenv()
+
+CONFIG_KEYS = ("GROQ_API_KEY", "GROQ_MODEL", "BENCHMARK_TICKER", "RISK_FREE_RATE")
+
+
+def load_secrets() -> None:
+    """Bridge Streamlit Cloud's secrets into the environment.
+
+    Deployed there is no .env file — configuration is pasted into the app's
+    Secrets box instead. Copying it into os.environ means every module keeps
+    reading config the one way, whether it is running locally or hosted.
+    """
+    try:
+        for key in CONFIG_KEYS:
+            if key in st.secrets and not os.getenv(key):
+                os.environ[key] = str(st.secrets[key])
+    except Exception:
+        # No secrets configured at all: normal when running locally from .env.
+        pass
+
+
+load_secrets()
 
 st.set_page_config(
     page_title="US Stock Portfolio Analyst",

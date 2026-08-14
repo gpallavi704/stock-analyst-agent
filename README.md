@@ -129,6 +129,46 @@ while an exhausted daily budget needs a different `GROQ_MODEL` — switching giv
 you a fresh allowance. Tool payloads are serialised as CSV rather than JSON
 records, which cuts 38–58% off the tokens a wide table costs.
 
+## Deploying
+
+The app is deployable to [Streamlit Community Cloud](https://share.streamlit.io) for free
+from this repo.
+
+1. Go to https://share.streamlit.io and sign in with GitHub.
+2. **Create app** → **Deploy a public app from GitHub**.
+3. Repository `gpallavi704/stock-analyst-agent`, branch `main`, main file `app.py`.
+4. Under **Advanced settings**, set Python to **3.12** and paste into **Secrets**:
+
+   ```toml
+   GROQ_API_KEY = "gsk_your_key_here"
+   GROQ_MODEL = "qwen/qwen3.6-27b"
+   BENCHMARK_TICKER = "SPY"
+   RISK_FREE_RATE = "0.045"
+   ```
+
+5. **Deploy.** First build takes a few minutes.
+
+Two things this repo does to make that work:
+
+- **`requirements.txt` is committed.** Community Cloud does not read `uv.lock`, and it
+  assumes any `pyproject.toml` is Poetry format — this one is PEP 621. The file is
+  generated from the lockfile, so the deployed versions match local exactly:
+
+  ```bash
+  uv export --format requirements-txt --no-hashes --no-emit-project --no-dev -o requirements.txt
+  ```
+
+  Re-run it whenever dependencies change.
+
+- **Secrets are bridged into the environment** in `app.py`, since there is no `.env` file
+  on the host.
+
+**Caveat worth knowing:** Yahoo Finance rate-limits datacenter IPs more aggressively than
+home connections, so a hosted instance may see slower or occasionally failed price fetches
+where local runs are fine. The app degrades honestly — missing prices are flagged, not
+silently dropped — and **Refresh market data** retries. If it proves a problem, running
+locally is unaffected.
+
 ## Layout
 
 ```
