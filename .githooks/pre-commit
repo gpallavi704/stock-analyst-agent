@@ -11,9 +11,17 @@
 staged=$(git diff --cached --name-only)
 
 # 1. Secrets files, whatever directory they appear in.
-if printf '%s\n' "$staged" | grep -qE '(^|/)\.env($|\.)|(^|/)secrets\.toml$|\.pem$|\.p12$|(^|/)id_rsa$'; then
+#
+# Template files are stripped out first. `.env.example` is the file that is
+# *supposed* to be committed, and an earlier version of this hook blocked it
+# while printing a message saying it belonged in the repo.
+suspect=$(printf '%s\n' "$staged" \
+    | grep -vE '\.(example|sample|template|dist)$' \
+    | grep -E '(^|/)\.env($|\.)|(^|/)secrets\.toml$|\.pem$|\.p12$|(^|/)id_rsa$')
+
+if [ -n "$suspect" ]; then
     echo "COMMIT BLOCKED: a secrets file is staged."
-    printf '%s\n' "$staged" | grep -E '(^|/)\.env($|\.)|(^|/)secrets\.toml$|\.pem$|\.p12$|(^|/)id_rsa$' | sed 's/^/  /'
+    printf '%s\n' "$suspect" | sed 's/^/  /'
     echo
     echo "Unstage it:  git restore --staged <file>"
     echo "Only .env.example, with placeholder values, belongs in the repo."
